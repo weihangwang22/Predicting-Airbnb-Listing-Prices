@@ -1,0 +1,648 @@
+---
+title: "Predicting Airbnb Listing Prices"
+author: "Weihang Wang"
+date: "2022-11-19"
+output: html_document
+---
+
+```{r knitr_init, echo=FALSE, cache=FALSE,include=FALSE}
+Sys.setenv(LANGUAGE = "en")
+rm(list = ls())
+library(knitr)
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(rmdformats)
+## Global options
+options(max.print="150") 
+opts_chunk$set(echo=TRUE,
+	             cache=TRUE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE)
+opts_knit$set(width=120)
+
+setwd("/Users/weihangwang/Documents/Airbnb Project/airbnb_data")
+```
+
+## **0. Loading the data**
+
+```{r}
+data <- read.csv("airbnb_data.csv",header=T,na.strings=c("","NA"))
+# head(data)
+# dim(data)
+# str(data)
+# summary(data)
+# View(data) 
+```
+
+```{r, warning=FALSE}
+library(naniar)
+vis_miss(data, warn_large_data = FALSE)
+
+# delete amenities and neighbourhood
+data <- data %>% select(-X, -amenities, -first_review, -host_response_rate, -last_review, -neighbourhood, -zipcode)
+# vis_miss(data, warn_large_data = FALSE)
+
+sum(is.na(data))
+data <- na.omit(data) # 27667 left
+```
+
+## **1. Preparing the data**
+
+```{r}
+# convert character variables into factor variables
+cols <- c("property_type", "room_type", "bed_type", "cancellation_policy", "city")
+data[cols] <- lapply(data[cols], factor)
+
+# convert factors to dummy
+levels(data$property_type)
+table(data$property_type)
+data$apartment <- as.numeric(data$property_type == "Apartment")
+data$house <- as.numeric(data$property_type == "House")
+data$condominium <- as.numeric(data$property_type == "Condominium")
+data$townhouse <- as.numeric(data$property_type == "Townhouse")
+data$loft <- as.numeric(data$property_type == "Loft")
+data$bednbreakfast <- as.numeric(data$property_type == "Bed & Breakfast")
+data$guesthouse <- as.numeric(data$property_type == "Guesthouse")
+data$bungalow <- as.numeric(data$property_type == "Bungalow")
+# data$other_type <- as.numeric(data$property_type != "Apartment" & data$property_type != "House" & data$property_type != "Condominium" & data$property_type != "Townhouse" & data$property_type != "Loft" & data$property_type != "Bed & Breakfast" & data$property_type != "Guesthouse" & data$property_type != "Bungalow")
+data$property_type <- factor(ifelse(data$property_type != "Apartment" & data$property_type != "House" & data$property_type != "Condominium" & data$property_type != "Townhouse" & data$property_type != "Loft" & data$property_type != "Bed & Breakfast" & data$property_type != "Guesthouse" & data$property_type != "Bungalow", "Others", as.character(data$property_type)))
+
+levels(data$room_type)
+table(data$room_type)
+data$entire_home <- as.numeric(data$room_type == "Entire home/apt")
+data$private_room <- as.numeric(data$room_type == "Private room")
+# data$shared_room <- as.numeric(data$room_type == "Shared room")
+
+levels(data$bed_type)
+table(data$bed_type)
+data$airbed <- as.numeric(data$bed_type == "Airbed")
+# data$couch <- as.numeric(data$bed_type == "Couch")
+data$futon <- as.numeric(data$bed_type == "Futon")
+data$sofa <- as.numeric(data$bed_type == "Pull-out Sofa")
+data$bed <- as.numeric(data$bed_type == "Real Bed")
+
+levels(data$cancellation_policy)
+table(data$cancellation_policy)
+data$flexible <- as.numeric(data$cancellation_policy == "flexible")
+data$moderate <- as.numeric(data$cancellation_policy == "moderate")
+data$strict <- as.numeric(data$cancellation_policy == "strict")
+# data$super_strict_30 <- as.numeric(data$cancellation_policy == "super_strict_30")
+# data$super_strict_60 <- as.numeric(data$cancellation_policy == "super_strict_60")
+
+levels(data$city)
+table(data$city)
+# data$Boston <- as.numeric(data$city == "Boston")
+data$Chicago <- as.numeric(data$city == "Chicago")
+data$DC <- as.numeric(data$city == "DC")
+data$LA <- as.numeric(data$city == "LA")
+data$NYC <- as.numeric(data$city == "NYC")
+data$SF <- as.numeric(data$city == "SF")
+
+# convert character variables into numeric variables and date
+library(lubridate)
+data <- data %>% mutate(free_cleaning = ifelse(cleaning_fee == T, 1, 0),
+                        has_profile_pic = ifelse(host_has_profile_pic == "t",1,0),
+                        identity_verified = ifelse(host_identity_verified == "t",1,0),
+                        instant = ifelse(instant_bookable == "t",1,0),
+                        host_date = parse_date_time(data$host_since, "mdy")) %>%
+  select(-cleaning_fee, -host_has_profile_pic, -host_identity_verified, -instant_bookable, -host_since)
+
+# str(data)
+```
+
+## **2. Data description**
+### **1) Summary Statistics**
+```{r}
+library(gt)
+library(data.table)
+library(psych)
+
+describe(data, skew = F, ranges = T)
+
+Table1 <- describe(data, skew = F, ranges = T) %>% 
+  select(-vars,-n) %>% 
+  transpose(keep.names = "stat")
+colnames(Table1) <- c("stat",colnames(data))
+Table1
+```
+
+```{r}
+Table1 %>% select(log_price, accommodates, bathrooms, number_of_reviews, bedrooms, beds, apartment, house, condominium, free_cleaning, has_profile_pic, identity_verified, instant) %>% 
+  gt(rowname_col = 'stat') %>% 
+  fmt_number(everything()) %>% 
+  tab_header(
+    title = "Statistics of Airbnb dataset"
+  ) %>% 
+  tab_footnote(
+    footnote = "log_price: natural log of price of the listing") %>% 
+  tab_footnote(
+    footnote = "accommodates: number of people allowed in the listing") %>% 
+  tab_footnote(
+    footnote = "free_cleaning: whether cleaning fee charged") %>% 
+  tab_footnote(
+    footnote = "has_profile_pic: whether the host has a profile pic") %>% 
+  tab_footnote(
+    footnote = "identity_verified: whether the host's identity has been verified") %>% 
+  tab_footnote(
+    footnote = "instant: whether the listing can be booked instantly") %>% 
+  tab_source_note(
+    source_note = md("*Source: Airbnb dataset.*")
+  )
+```
+
+### **2) distribution of price**
+
+```{r}
+ggplot(data) +
+  aes(x = log_price) +
+  geom_histogram(bins = 50L, fill = "#112446", color='white') +
+  labs(x = "Log of Price") +
+  theme_minimal() +
+  theme(
+    axis.title.y = element_text(size = 14L),
+    axis.title.x = element_text(size = 14L)
+  )
+```
+
+### ** 3) hosts of each city across room_type**
+
+```{r}
+ggplot(data) +
+  aes(x = room_type, fill = city) +
+  geom_bar(position = "dodge") +
+  scale_fill_viridis_d(option = "viridis", direction = 1) +
+  labs(x = "room type") +
+  theme_minimal() +
+  theme(
+    plot.caption = element_text(size = 12L),
+    axis.title.y = element_text(size = 14L),
+    axis.title.x = element_text(size = 14L)
+  )
+```
+
+### **4) Average log price across property type and city**
+
+```{r}
+Table2 <- data %>%
+          group_by(property_type, city) %>% 
+          summarize(mean = mean(log_price)) %>% 
+          pivot_wider(names_from = property_type,values_from = mean)
+
+colnames(Table2) <- c('city','Apartment','Bed & Breakfast','Bunglow','Condominium', 'Guesthouse','House', 'Loft', 'Others', 'Townhouse')
+
+Table2 %>% gt(rowname_col = 'city') %>%
+  tab_stubhead(label = "city") %>% 
+  tab_header(
+    title = "Average log price across property type and city"
+  ) %>% 
+  fmt_number(
+    columns = everything(),
+    suffixing = TRUE
+  ) %>% 
+  fmt_integer(columns = city) 
+```
+
+### **5) Average log price  across room type and city**
+
+
+```{r}
+Table3 <- data %>%
+          group_by(room_type, city) %>% 
+          summarize(mean = mean(log_price)) %>% 
+          pivot_wider(names_from = room_type,values_from = mean)
+
+colnames(Table3) <- c('city','Entire home/apt','Private room','Shared room')
+
+Table3 %>% gt(rowname_col = 'city') %>%
+  tab_stubhead(label = "city") %>% 
+  tab_header(
+    title = "Average log price across room type and city"
+  ) %>% 
+  fmt_number(
+    columns = everything(),
+    suffixing = TRUE
+  ) %>% 
+  fmt_integer(columns = city) 
+```
+
+## **3. Linear regression using Forward stepwise selection**
+
+```{r}
+data <- data %>% select(-property_type, -room_type, -bed_type, -cancellation_policy, -city, -host_date)
+```
+
+```{r}
+library(caret)
+set.seed(123)
+trainIndex <- createDataPartition(data$log_price, p = .75, 
+                                  list = FALSE, 
+                                  times = 1)
+
+train <- data[ trainIndex,]
+test  <- data[-trainIndex,]
+```
+
+```{r}
+library(leaps)
+regfit.bwd <- regsubsets(log_price ~ ., data = data, nvmax = 34, method = "backward")
+summary(regfit.bwd)
+coef(regfit.bwd, 10)
+```
+
+```{r}
+# use cross-validation to choose the one with lowest RMSE**
+form <- {}
+coefi <- {}
+
+for (i in 1:34) {
+  coefi <- coef(regfit.bwd,i)
+  form[i] <- "log_price ~"
+  
+  for (j in 1:i) {
+    form[i] <- paste(form[i],names(coefi[j+1]))
+    if (j < i){
+      form[i] <- paste(form[i],'+')
+    }
+  }
+}
+```
+
+```{r}
+set.seed(234)
+library(caret)
+model1 <- list()
+
+# Fit lm model using 5 x 5-fold CV: model
+for (i in 1:34) {
+  model1[[i]] <- train(
+    formula(form[i]), 
+    train,
+    method = "lm",
+    trControl = trainControl(
+      method = "repeatedcv", 
+      number = 5, 
+      repeats = 5, 
+      verboseIter = FALSE
+    )
+  )
+}
+
+# Print model to console
+
+cv_rmse <- {}
+
+for (i in 1:34) {
+  print(model1[[i]]$results$RMSE)
+  cv_rmse[i] <- model1[[i]]$results$RMSE
+}
+
+n <- which.min(cv_rmse)
+min(cv_rmse)
+form[which.min(cv_rmse)]
+```
+
+```{r}
+num_vars = c(1:34)
+df.ols_cv_rmse = as.data.frame(cbind(num_vars, cv_rmse))
+df.ols_cv_rmse <- as.data.frame(lapply(df.ols_cv_rmse, unlist))
+ggplot(df.ols_cv_rmse, aes(x = num_vars, y = cv_rmse)) + 
+  geom_line() + geom_point(size=2) +
+  geom_vline(aes(xintercept = n), colour="#BB0000", linetype="dashed") +
+  scale_x_continuous(breaks = seq(1,34,3))+
+  labs(x='Number of Predictors',y='RMSE')+
+  theme_test(base_size = 34)+
+  theme(legend.title = element_blank(),
+        legend.text = element_text(),
+        legend.position = c(.2,.9),
+        legend.direction = "horizontal",
+        axis.text = element_text(size = 12, color = 'black'),
+        axis.title = element_text(size = 16,color = 'black'))
+```
+
+```{r}
+# re-estimate the final model on whole training set, use it to make prediction on test set
+linear_model <- lm(formula(form[n]),train)
+summary(linear_model)
+```
+
+```{r}
+# get the predict power (RMSE) of our picked model on test set
+pred.lm <- predict(linear_model,test)
+sqrt(mean((pred.lm - test$log_price)^2))
+```
+
+
+
+
+## **4. Random forest**
+
+```{r}
+library(randomForest)
+library(ranger)
+```
+
+```{r}
+tuneGrid <- expand.grid(
+  .mtry = c(8:20),
+  .splitrule = "variance",
+  .min.node.size = c(5:12)
+)
+
+set.seed(345)
+# Fit random forest: model
+rf_model <- train(
+  log_price ~ .,
+  tuneLength = 1,
+  data = train, 
+  method = "ranger",
+  metric = "RMSE",
+  tuneGrid = tuneGrid,
+  trControl = trainControl(
+    method = "cv", 
+    number = 5,
+    classProbs=TRUE,
+    verboseIter = FALSE,
+  )
+)
+
+# Print model to console
+rf_model
+plot(rf_model)
+rf_model$bestTune
+```
+
+```{r}
+opt_param <- ggplot(rf_model)
+opt_param + geom_vline(aes(xintercept = rf_model$bestTune$mtry), colour="#BB0000", linetype="dashed") + 
+  scale_x_continuous(breaks = seq(8, 20, by = 1)) +
+  labs(x='Number of Randomly Selected Predictors',y='RMSE(Cross-Validation)')+
+  theme_test(base_size = 20)+
+  theme(legend.title = element_blank(),
+        legend.text = element_text(family = 'serif'),
+        legend.position = c(.3, .9),
+        legend.direction = "horizontal",
+        axis.text = element_text(family = 'serif', size = 12, color = 'black'),
+        axis.title = element_text(family = 'serif',size = 16, color = 'black'))+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+```{r}
+set.seed(456)
+rf_model <- randomForest(formula = log_price ~ .,
+                         nodesize = rf_model$bestTune$min.node.size,
+                         splitrule = rf_model$bestTune$splitrule,
+                         mtry = rf_model$bestTune$mtry,
+                         ntree = 500,
+                         importance = TRUE,                         
+                         data = train)
+
+pred.rf <- predict(rf_model, test)  
+sqrt(mean((pred.rf - test$log_price)^2))
+```
+
+```{r}
+num_trees = plot(rf_model, 
+                 family = 'serif', font = 2, 
+                 cex.axis = 1.5, cex.lab = 1.5, 
+                 main = '', ylim = c(.12, .22)) + 
+  abline(v = 340, col = 'red', lty = 3)
+```
+
+```{r}
+num_trees = seq(1:500)
+rf_rmse = lapply(rf_model$mse, sqrt)
+df_num_trees = as.data.frame(cbind(num_trees, rf_rmse))
+df_num_trees <- as.data.frame(lapply(df_num_trees, unlist))
+
+ggplot(df_num_trees, aes(x = num_trees, y = rf_rmse)) + geom_line() + 
+  geom_vline(aes(xintercept = 340), colour="#BB0000", linetype="dashed") +
+  scale_x_continuous(breaks = seq(0,1000,100))+
+  scale_y_continuous(breaks = seq(5,20,5))+
+  labs(x='Number of Trees',y='RMSE')+
+  theme_test(base_size = 20)+
+  theme(legend.title = element_blank(),
+        legend.text = element_text(family = 'serif'),
+        legend.position = c(.2,.9),
+        legend.direction = "horizontal",
+        axis.text = element_text(family = 'serif', color = 'black'),
+        axis.title = element_text(family = 'serif',size = 16,color = 'black'))
+```
+
+```{r}
+varImpPlot(rf_model,
+           sort = T,
+           n.var = 20,
+           type = 1,
+           main = "Top 20 - Variable Importance")
+```
+
+## **5. Neural network**
+
+```{r}
+library(tfdatasets)
+library(reticulate)
+library(keras)
+library(neuralnet)
+```
+
+```{r}
+set.seed(567)
+nn.train <- as_tibble(train)
+nn.test <- as_tibble(test)
+```
+
+```{r}
+# Normalize features
+spec <- feature_spec(nn.train, log_price ~.) %>% 
+  step_numeric_column(all_numeric(), normalizer_fn = scaler_standard()) %>% 
+  fit()
+```
+
+```{r}
+# Create the model
+model <- keras_model_sequential()
+
+input <- layer_input_from_dataset(nn.train %>%
+    select(-log_price))
+
+output_layer <- list()
+
+output_layer[[1]] <- input %>%
+    layer_dense_features(dense_features(spec)) %>% 
+    layer_dense(units = 32, activation = "relu") %>%
+    layer_dense(units = 1) 
+
+output_layer[[2]] <- input %>%
+    layer_dense_features(dense_features(spec)) %>% 
+    layer_dense(units = 32, activation = "relu") %>%
+    layer_dense(units = 16, activation = "relu") %>%
+    layer_dense(units = 1) 
+
+output_layer[[3]] <- input %>%
+    layer_dense_features(dense_features(spec)) %>% 
+    layer_dense(units = 32, activation = "relu") %>%
+    layer_dense(units = 16, activation = "relu") %>%
+    layer_dense(units = 8, activation = "relu") %>%
+    layer_dense(units = 1) 
+
+output_layer[[4]] <- input %>%
+    layer_dense_features(dense_features(spec)) %>% 
+    layer_dense(units = 32, activation = "relu") %>%
+    layer_dense(units = 16, activation = "relu") %>%
+    layer_dense(units = 8, activation = "relu") %>%
+    layer_dense(units = 4, activation = "relu") %>%
+    layer_dense(units = 1) 
+
+output_layer[[5]] <- input %>%
+    layer_dense_features(dense_features(spec)) %>% 
+    layer_dense(units = 32, activation = "relu") %>%
+    layer_dense(units = 16, activation = "relu") %>%
+    layer_dense(units = 8, activation = "relu") %>%
+    layer_dense(units = 4, activation = "relu") %>%
+    layer_dense(units = 2, activation = "relu") %>%
+    layer_dense(units = 1) 
+
+# Display training progress by printing a single dot for each completed epoch.
+print_dot_callback <- callback_lambda(
+  on_epoch_end = function(epoch, logs) {
+    if (epoch %% 50 == 0) cat("\n")
+    cat(".")
+  }
+)
+
+# TRAINING AND EVALUATION
+early_stop <- callback_early_stopping(monitor = "val_loss", patience = 50)
+
+model_layer <- list()
+history_layer <- list()
+for (i in 1:5) {
+  model_layer[[i]] <- keras_model(input, output_layer[[i]])
+  model_layer[[i]] %>% 
+  compile(
+    loss = "mse",
+    optimizer = optimizer_rmsprop(learning_rate = 0.001),
+    metrics = list("mean_absolute_error")
+  )
+  history_layer[[i]] <- model_layer[[i]] %>% fit(
+  x = nn.train %>% dplyr::select(-log_price),
+  y = nn.train$log_price,
+  epochs = 300,
+  validation_split = 0.2,
+  verbose = 0,
+  use_multiprocessing=TRUE,
+  callbacks = list(print_dot_callback, early_stop)
+)
+}
+```
+
+```{r}
+# Find the neural network that has the lowest RMSE on train set
+train_predictions <- list()
+RMSE <- list()
+for (i in 1:5) {
+  train_predictions[[i]] <- model_layer[[i]] %>%
+    predict(nn.train %>%
+        dplyr::select(-log_price))
+  RMSE[[i]] <- caret::RMSE(train_predictions[[i]][, 1], train$log_price)
+}
+
+best_layer <- which.min(RMSE)
+best_layer
+```
+
+```{r}
+RMSE[[best_layer]]
+```
+
+```{r}
+plot(history_layer[[best_layer]])
+```
+
+```{r}
+set.seed(678)
+
+nn_model <- keras_model(input, output_layer[[best_layer]])
+  nn_model %>% 
+  compile(
+    loss = "mse",
+    optimizer = optimizer_rmsprop(),
+    metrics = list("mean_absolute_error")
+  )
+  
+  summary(nn_model)
+```
+
+```{r}
+test_predictions <- nn_model %>%
+    predict(test %>% select(-log_price))
+
+caret::RMSE(test_predictions[, 1], test$log_price)
+```
+
+```{r}
+test_predictions <- nn_model  %>% predict(test %>% select(-log_price))
+
+test$pred <- test_predictions[ , 1]
+test$log_price <- as.numeric(test$log_price)
+
+ggplot(test) +
+  geom_point(aes(x = pred, y = log_price)) +
+  coord_fixed(ratio = 1) +
+  geom_abline(intercept = 0, slope = 1, color = "blue")
+
+qplot(test$pred - test$log_price, geom = "density")
+
+caret::RMSE(test_predictions[, 1], test$log_price)
+```
+
+
+```{r}
+num_layers = c(1:5)
+df_nn.rmse = as.data.frame(cbind(num_layers, RMSE))
+df_nn.rmse <- as.data.frame(lapply(df_nn.rmse, unlist))
+ggplot(df_nn.rmse, aes(x = num_layers, y = RMSE)) + 
+  geom_line() + geom_point(size=2) +
+  geom_vline(aes(xintercept = best_layer), colour="#BB0000", linetype="dashed") +
+  scale_x_continuous(breaks = seq(1,5))+
+  labs(x='Number of Layers',y='RMSE')+
+  theme_test(base_size = 34)+
+  theme(legend.title = element_blank(),
+        legend.text = element_text(),
+        legend.position = c(.2,.9),
+        legend.direction = "horizontal",
+        axis.text = element_text(size = 12,color = 'black'),
+        axis.title = element_text(size = 12,color = 'black'))
+```
+
+```{r}
+val_loss_history <- history_layer[[best_layer]]$metrics$val_loss
+val_mae_history <- history_layer[[best_layer]]$metrics$val_mean_absolute_error
+
+val_mse_history <- data.frame(
+  epoch = seq(1:115),
+  validation_mse = val_loss_history
+)
+
+val_mae_history <- data.frame(
+  epoch = seq(1:115),
+  validation_mae = val_mae_history
+)
+
+ggplot(val_mse_history, aes(x = epoch, y = validation_mse)) + geom_line() + 
+  scale_x_continuous(breaks = seq(0,115,15))+
+  scale_y_continuous(breaks = seq(.1,.5))+
+  labs(x='Number of Epochs',y='Validation MSE')+
+  theme_test(base_size = 34)+
+  theme(legend.title = element_blank(),
+        legend.text = element_text(),
+        legend.position = c(.2,.9),
+        legend.direction = "horizontal",
+        axis.text = element_text(size = 12, color = 'black'),
+        axis.title = element_text(size = 12,color = 'black'))
+```
+
+
